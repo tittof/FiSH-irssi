@@ -42,6 +42,37 @@ int getContactKey(const char *contactPtr, char *theKey)
 }
 
 /*
+ * Load the encryption method for contact
+ * If theMethod is NULL, only a test is made (= IsMethodSetForContact)
+ * @param contactPtr
+ * @param theMethod
+ * @return 1 if everything ok 0 if not
+ */
+int getContactMethod(const char *contactPtr, char *theMethod)
+{
+    struct IniValue iniValue;
+    int bRet = FALSE;
+
+    iniValue = allocateIni(contactPtr, "method", iniPath);
+    bzero(iniValue.key, iniValue.iniKeySize);
+    getIniValue(contactPtr, "method", "", iniValue.key, iniValue.iniKeySize, iniPath);
+
+    if (strlen(iniValue.key) < 2) {
+        freeIni(iniValue);
+        return bRet;
+    }
+
+    if (theMethod) {
+        *theMethod = '\0';
+        strncat(theMethod, iniValue.key, iniValue.iniKeySize);
+        bRet = TRUE;
+    }
+
+    freeIni(iniValue);
+    return bRet;
+}
+
+/*
  * Construct a ini section key for contact
  * @param server irssi server record
  * @param contactPtr contact
@@ -92,6 +123,7 @@ int FiSH_encrypt(const SERVER_REC * serverRec, const char *msgPtr,
         const char *target, char *bf_dest)
 {
     struct IniValue iniValue;
+    struct IniValue iniValueEncryptionMethod;
     char contactName[CONTACT_SIZE] = "";
 
     if (IsNULLorEmpty(msgPtr) || bf_dest == NULL || IsNULLorEmpty(target))
@@ -110,10 +142,20 @@ int FiSH_encrypt(const SERVER_REC * serverRec, const char *msgPtr,
         return 0;
     }
 
+    iniValueEncryptionMethod = allocateIni(contactName, "method", iniPath);
+
     strcpy(bf_dest, "+OK ");
-    encrypt_string(iniValue.key, msgPtr, bf_dest + 4, strlen(msgPtr));
+
+    if (getContactMethod(contactName, iniValueEncryptionMethod.key) == FALSE) {
+        /* no encryption method defined so use blowfish ecb */
+        encrypt_string(iniValue.key, msgPtr, bf_dest + 4, strlen(msgPtr));
+    } else {
+       /* use the new method. Maybe make this a case switch lateron */
+        encrypt_string_xs(iniValue.key, msgPtr, bf_dest + 4, strlen(msgPtr));
+    }
 
     freeIni(iniValue);
+    freeIni(iniValueEncryptionMethod);
     return 1;
 }
 
@@ -125,6 +167,7 @@ int FiSH_decrypt(const SERVER_REC * serverRec, char *msg_ptr,
 {
     char contactName[CONTACT_SIZE] = "";
     struct IniValue iniValue;
+    struct IniValue iniValueEncryptionMethod;
     char bf_dest[1000] = "";
     char myMark[20] = "";
     int msg_len, i, mark_broken_block = 0, action_found = 0;
@@ -142,13 +185,17 @@ int FiSH_decrypt(const SERVER_REC * serverRec, char *msg_ptr,
     else
         return 0; // don't process, blowcrypt-prefix not found
 
-    // Verify base64 string
     msg_len = strlen(msg_ptr);
-    if ((strspn(msg_ptr, B64) != (size_t) msg_len) || (msg_len < 12))
-        return 0;
-
     if (getIniSectionForContact(serverRec, target, contactName) == FALSE)
         return 0;
+    iniValueEncryptionMethod = allocateIni(contactName, "method", iniPath);
+    if (getContactMethod(contactName, iniValueEncryptionMethod.key) == FALSE) {
+        // Verify base64 string
+        if ((strspn(msg_ptr, B64) != (size_t) msg_len) || (msg_len < 12)) {
+            freeIni(iniValueEncryptionMethod);
+            return 0;
+        }
+    }
 
     iniValue = allocateIni(contactName, "key", iniPath);
 
@@ -161,21 +208,25 @@ int FiSH_decrypt(const SERVER_REC * serverRec, char *msg_ptr,
     if (msg_len >= (int)(sizeof(bf_dest) * 1.5))
         msg_ptr[(int)(sizeof(bf_dest) * 1.5) - 20] = '\0';
 
-    // block-align blowcrypt strings if truncated by IRC server (each block is 12 chars long)
-    // such a truncated block is destroyed and not needed anymore
-    if (msg_len != (msg_len / 12) * 12) {
-        msg_len = (msg_len / 12) * 12;
-        msg_ptr[msg_len] = '\0';
-        strncpy(myMark, settings_get_str("mark_broken_block"),
-                sizeof(myMark));
-        if (*myMark == '\0' || isNoChar(*myMark))
-            mark_broken_block = 0;
-        else
-            mark_broken_block = 1;
+    if (getContactMethod(contactName, iniValueEncryptionMethod.key) == FALSE) {
+        // block-align blowcrypt strings if truncated by IRC server (each block is 12 chars long)
+        // such a truncated block is destroyed and not needed anymore
+        if (msg_len != (msg_len / 12) * 12) {
+            msg_len = (msg_len / 12) * 12;
+            msg_ptr[msg_len] = '\0';
+            strncpy(myMark, settings_get_str("mark_broken_block"),
+                    sizeof(myMark));
+            if (*myMark == '\0' || isNoChar(*myMark))
+                mark_broken_block = 0;
+            else
+                mark_broken_block = 1;
+        }
+        decrypt_string(iniValue.key, msg_ptr, bf_dest, msg_len);
+    } else {
+        decrypt_string_xs(iniValue.key, msg_ptr, bf_dest, msg_len);
     }
-
-    decrypt_string(iniValue.key, msg_ptr, bf_dest, msg_len);
     freeIni(iniValue);
+    freeIni(iniValueEncryptionMethod);
 
     if (*bf_dest == '\0')
         return 0; // don't process, decrypted msg is bad
@@ -635,6 +686,9 @@ void cmd_helpfish(const char *arg, SERVER_REC * server, WI_ITEM_REC * item)
             " /delkey [-<server tag>] [<nick | #channel>]\n"
             " /key|showkey [-<server tag>] [<nick | #channel>]\n"
             " /keyx [<nick>] (DH1080 KeyXchange)\n"
+            " /setmethod [-<server tag>] [<nick | #channel>] <method>\n"
+            " /delmethod [-<server tag>] [<nick | #channel>]\n"
+            " /method|showmethod [-<server tag>] [<nick | #channel>]\n"
             " /setinipw <blow.ini_password>\n"
             " /unsetinipw\n"
             " /fishlogin\n");
@@ -872,6 +926,181 @@ static void cmd_unsetinipw(const char *arg, SERVER_REC * server,
     printtext(server, item != NULL ? window_item_get_target(item) : NULL,
             MSGLEVEL_CRAP,
             "\002FiSH:\002 Changed back to default blow.ini password, you won't have to enter it on start-up anymore!");
+}
+
+/**
+ * Sets the encryption method for a nick / channel in a server
+ * @param data command
+ * @param server irssi server record
+ * @param item irssi window/item
+ */
+void cmd_setmethod(const char *data, SERVER_REC * server, WI_ITEM_REC * item)
+{
+    GHashTable *optlist;
+    char contactName[CONTACT_SIZE] = "";
+    int keySize;
+
+    const char *target, *key;
+    void *free_arg;
+
+    if (IsNULLorEmpty(data)) {
+        printtext(server,
+                item != NULL ? window_item_get_target(item) : NULL,
+                MSGLEVEL_CRAP,
+                "\002FiSH:\002 No parameters. Usage: /setmethod [-<server tag>] [<nick | #channel>] <method>");
+        return;
+    }
+
+    if (!cmd_get_params(data, &free_arg, 2 | PARAM_FLAG_OPTIONS |
+                PARAM_FLAG_UNKNOWN_OPTIONS | PARAM_FLAG_GETREST,
+                "setmethod", &optlist, &target, &key))
+        return;
+
+    if (*target == '\0') {
+        printtext(server,
+                item != NULL ? window_item_get_target(item) : NULL,
+                MSGLEVEL_CRAP,
+                "\002FiSH:\002 No parameters. Usage: /setmethod [-<server tag>] [<nick | #channel>] <method>");
+        cmd_params_free(free_arg);
+        return;
+    }
+
+    server = cmd_options_get_server("setmethod", optlist, server);
+    if (server == NULL || !server->connected)
+        cmd_param_error(CMDERR_NOT_CONNECTED);
+
+    if (*key == '\0') {
+        // one paramter given - it's the key
+        key = target;
+        if (item != NULL)
+            target = window_item_get_target(item);
+        else {
+            printtext(NULL, NULL, MSGLEVEL_CRAP,
+                    "\002FiSH:\002 Please define nick/#channel. Usage: /setmethod [-<server tag>] [<nick | #channel>] <method>");
+            cmd_params_free(free_arg);
+            return;
+        }
+    }
+
+    if (getIniSectionForContact(server, target, contactName) == FALSE) {
+        cmd_params_free(free_arg);
+        return;
+    }
+
+    if (setIniValue(contactName, "method", key, iniPath) == -1) {
+        printtext(server,
+                item != NULL ? window_item_get_target(item) : NULL,
+                MSGLEVEL_CRAP,
+                "\002FiSH ERROR:\002 Unable to write to blow.ini, probably out of space or permission denied.");
+        cmd_params_free(free_arg);
+        return;
+    }
+
+
+    printtext(server, item != NULL ? window_item_get_target(item) : NULL,
+            MSGLEVEL_CRAP,
+            "\002FiSH:\002 encryption Method for %s@%s successfully set!", target,
+            server->tag);
+
+    cmd_params_free(free_arg);
+}
+
+void cmd_delmethod(const char *data, SERVER_REC * server, WI_ITEM_REC * item)
+{
+    GHashTable *optlist;
+    char *target;
+    char contactName[CONTACT_SIZE] = "";
+    void *free_arg;
+
+    if (!cmd_get_params(data, &free_arg, 1 | PARAM_FLAG_OPTIONS |
+                PARAM_FLAG_UNKNOWN_OPTIONS | PARAM_FLAG_GETREST,
+                "delmethod", &optlist, &target))
+        return;
+
+    if (item != NULL && IsNULLorEmpty(target))
+        target = (char *)window_item_get_target(item);
+
+    if (IsNULLorEmpty(target)) {
+        printtext(server,
+                item != NULL ? window_item_get_target(item) : NULL,
+                MSGLEVEL_CRAP,
+                "\002FiSH:\002 No parameters. Usage: /delmethod [-<server tag>] [<nick | #channel>]");
+        return;
+    }
+
+    server = cmd_options_get_server("delmethod", optlist, server);
+    if (server == NULL || !server->connected)
+        cmd_param_error(CMDERR_NOT_CONNECTED);
+
+    target = (char *)g_strchomp(target);
+
+    if (getIniSectionForContact(server, target, contactName) == FALSE)
+        return;
+
+    if (deleteIniValue(contactName, "method", iniPath) == 1) {
+        printtext(server, item != NULL ? window_item_get_target(item) : NULL,
+                MSGLEVEL_CRAP,
+                "\002FiSH:\002 encryption method for %s@%s successfully removed!", target,
+                server->tag);
+    } else {
+        printtext(server, item != NULL ? window_item_get_target(item) : NULL,
+                MSGLEVEL_CRAP,
+                "\002FiSH:\002 No encryption method found for %s@%s", target,
+                server->tag);
+    }
+}
+
+void cmd_method(const char *data, SERVER_REC * server, WI_ITEM_REC * item)
+{
+    GHashTable *optlist;
+    char *target;
+    char contactName[CONTACT_SIZE] = "";
+    struct IniValue iniValue;
+    void *free_arg;
+
+    if (!cmd_get_params(data, &free_arg, 1 | PARAM_FLAG_OPTIONS |
+                PARAM_FLAG_UNKNOWN_OPTIONS | PARAM_FLAG_GETREST,
+                "method", &optlist, &target))
+        return;
+
+    if (item != NULL && IsNULLorEmpty(target))
+        target = (char *)window_item_get_target(item);
+
+    if (IsNULLorEmpty(target)) {
+        printtext(server,
+                item != NULL ? window_item_get_target(item) : NULL,
+                MSGLEVEL_CRAP,
+                "\002FiSH:\002 Please define nick/#channel. Usage: /method [-<server tag>] [<nick | #channel>]");
+        return;
+    }
+
+    server = cmd_options_get_server("method", optlist, server);
+    if (server == NULL || !server->connected)
+        cmd_param_error(CMDERR_NOT_CONNECTED);
+
+    target = (char *)g_strchomp(target);
+
+    if (getIniSectionForContact(server, target, contactName) == FALSE)
+        return;
+
+    iniValue = allocateIni(contactName, "method", iniPath);
+
+    if (getContactMethod(contactName, iniValue.key) == FALSE) {
+        freeIni(iniValue);
+
+        printtext(server,
+                item != NULL ? window_item_get_target(item) : NULL,
+                MSGLEVEL_CRAP,
+                "\002FiSH:\002 Encryption method for %s@%s not found or invalid!",
+                target, server->tag);
+        return;
+    }
+
+    printtext(server, target, MSGLEVEL_CRAP,
+            "\002FiSH:\002 Encryption method for %s@%s: %s", target, server->tag,
+            iniValue.key);
+
+    freeIni(iniValue);
 }
 
 /**
@@ -1257,6 +1486,10 @@ void setup_fish()
     command_bind("keyx", NULL, (SIGNAL_FUNC) cmd_keyx);
     command_bind("setinipw", NULL, (SIGNAL_FUNC) cmd_setinipw);
     command_bind("unsetinipw", NULL, (SIGNAL_FUNC) cmd_unsetinipw);
+    command_bind("setmethod", NULL, (SIGNAL_FUNC) cmd_setmethod);
+    command_bind("delmethod", NULL, (SIGNAL_FUNC) cmd_delmethod);
+    command_bind("method", NULL, (SIGNAL_FUNC) cmd_method);
+    command_bind("showmethod", NULL, (SIGNAL_FUNC) cmd_method);
 }
 
 void get_ini_password_hash(int password_size, char* password) {
@@ -1411,6 +1644,11 @@ void fish_deinit(void)
 
     command_unbind("fishhelp", (SIGNAL_FUNC) cmd_helpfish);
     command_unbind("helpfish", (SIGNAL_FUNC) cmd_helpfish);
+
+    command_unbind("setmethod", (SIGNAL_FUNC) cmd_setmethod);
+    command_unbind("delmethod", (SIGNAL_FUNC) cmd_delmethod);
+    command_unbind("method", (SIGNAL_FUNC) cmd_method);
+    command_unbind("showmethod", (SIGNAL_FUNC) cmd_method);
 
     DH1080_DeInit();
 

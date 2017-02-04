@@ -35,6 +35,14 @@ if(OPENSSL_FOUND)
     MESSAGE(STATUS "Using OpenSSL ${OPENSSL_VERSION}")
 ENDIF()
 
+# Look for libsodium
+PKG_CHECK_MODULES(LIBSODIUM REQUIRED libsodium)
+if(LIBSODIUM_FOUND)
+    INCLUDE_DIRECTORIES(${LIBSODIUM_INCLUDE_DIRS})
+    LINK_DIRECTORIES(${LILBSODIUM_LIBRARY_DIRS})
+    MESSAGE(STATUS "Using libsodium ${LIBSODIUM_VERSION}")
+ENDIF()
+
 # Sets a variable that the user can set with 
 # cmake -DIRSSI_INCLUDE_DIR:PATH=/path/to/irssi/includes .
 SET(IRSSI_INCLUDE_DIR "" CACHE PATH "Path to irssi include files")

@@ -8,6 +8,7 @@
 #include "DH1080.h"
 #include "module.h"
 #include "password.h"
+#include "XSalsa20Poly1305.h"
 
 #define CONTACT_SIZE 100 // size of buffer for contactName (nick or #channel)
 #define KEYBUF_SIZE 150	// size of buffer for base64 blowfish key (from blow.ini)
